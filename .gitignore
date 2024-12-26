@@ -1,0 +1,22 @@
+# Python bytecode
+__pycache__/
+
+# Django specific
+*.log
+*.pot
+*.pyc
+*.pyo
+*.db
+*.sqlite3
+*.env
+
+# Media files
+media/
+
+# Static files
+staticfiles/
+static/
+
+# VS Code
+.vscode/
+*.pem

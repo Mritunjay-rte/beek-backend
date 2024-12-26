@@ -1,0 +1,23 @@
+[
+    {
+        "model": "auth.group",
+        "pk": 1,
+        "fields": {
+            "name": "SUPER ADMIN"
+        }
+    },
+    {
+        "model": "auth.group",
+        "pk": 2,
+        "fields": {
+            "name": "USER"
+        }
+    },
+    {
+        "model": "health.service",
+        "pk": "54e1ee10-f5fe-48e3-871f-7ebdc068eac7",
+        "fields": {
+            "name": "1 Up"
+        }
+    }
+]

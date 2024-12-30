@@ -38,7 +38,9 @@ from health.utils import send_task_on_provider_connect
 from rest_framework.exceptions import NotFound
 from beek.settings import ssl_enabled
 import mimetypes
+import stripe
 from concurrent.futures import ThreadPoolExecutor
+from django.db import transaction
 executor = ThreadPoolExecutor(max_workers=1)
 EVEXIA_BASE_URL = config('EVEXIA_BASE_URL')
 AUTH_TOKEN = config('AUTH_TOKEN')

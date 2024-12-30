@@ -34,7 +34,7 @@ urlpatterns = [
     path('patient-test-results/', FetchOrderResults.as_view(), name='patient_test-results_results'),
     path('payment/', OrderPayment.as_view(), name='order_payment'),
     path('orderItemsAdd/', OrderItemsAdd.as_view(), name='order_items_add'),
-     path('deleteItemOrder/', DeleteItemOrder.as_view(), name='delete_item_order'),
+    path('deleteItemOrder/', DeleteItemOrder.as_view(), name='delete_item_order'),
 
 ]
 urlpatterns += router.urls

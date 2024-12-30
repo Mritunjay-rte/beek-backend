@@ -25,7 +25,7 @@ from user.views import SubscriptionListView
 from decouple import config
 from beek import settings
 from django.views.generic import RedirectView
-
+from hcpt.views import CPTListView
 
 schema_view = get_schema_view(
     openapi.Info(
@@ -56,7 +56,7 @@ urlpatterns += [
     path('provider/callback/', ConnectToProviderCallback.as_view(),name='provider-callback'),
     path('api/subscription/plans/', SubscriptionListView.as_view(), name='subscription-plans'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
-
+    path('api/find-cpt/', CPTListView.as_view(), name='find-cpt'),
 ]
 
 if settings.DEBUG:

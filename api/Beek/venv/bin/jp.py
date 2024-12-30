@@ -1,4 +1,4 @@
-#!/home/dev-16/beek-health/beekhealth-be-master/api/Beek/venv/bin/python3
+#!/home/rte/new-beek-health/beek-backend/api/Beek/venv/bin/python3
 
 import sys
 import json

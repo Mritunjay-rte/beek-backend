@@ -587,3 +587,85 @@ class ExternalAPILog(models.Model):
             str: A description of the API log with the API endpoint and the user ID.
         """
         return f"API Log: {self.api_endpoint} - User: {self.user.id}"
+
+class EvexiaMenu(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product_id = models.IntegerField(null=True, blank=True)
+    product_name = models.CharField(max_length=255, null=True, blank=True)
+    lab_id = models.IntegerField(null=True, blank=True)
+    is_panel = models.BooleanField(default=False)
+    sales_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    test_code = models.CharField(max_length=100, null=True, blank=True)
+    is_kit = models.BooleanField(default=False)
+    lab_name = models.CharField(max_length=255, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return str(self.id)
+
+    class Meta:
+        db_table = 'health_evexia_menu'  # Custom table name
+
+
+class EvexiaPatient(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient_id = models.CharField(max_length=255, unique=True, null=True, blank=True)
+    external_client_id = models.UUIDField(null=True, blank=True)
+    user_id = models.UUIDField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'health_evexia_patient'
+
+    def __str__(self):
+        return f"Patient {self.patient_id} (External ID: {self.external_client_id})"
+
+
+
+class EvexiaOrders(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient_id = models.CharField(max_length=255, null=True, blank=True)
+    patient_order_id = models.CharField(max_length=255, unique=True, null=True, blank=True)
+    product_id = models.CharField(max_length=255, unique=True, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    documents = models.FileField(upload_to='receipts/', null=True, blank=True)
+    payment_status = models.CharField(max_length=255, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'health_evexia_orders'
+
+    def __str__(self):
+        return f"Patient {self.patient_id} (Order ID: {self.patient_order_id})"
+
+
+class EvexiaPayment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient_id = models.CharField(max_length=255, null=True, blank=True)
+    payment_id = models.CharField(max_length=255, null=True, blank=True) 
+    patient_order_id = models.CharField(max_length=255, null=True, blank=True) 
+    total_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        null=False, 
+        blank=False, 
+        help_text="Total amount for the payment in USD or applicable currency."
+    )
+    payment_status = models.CharField(
+        max_length=50,  # You can adjust the length as per your requirements
+        null=False, 
+        blank=False, 
+        help_text="Payment status (e.g., succeeded, failed, pending)."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'health_evexia_payments'
+        verbose_name = 'Evexia Order Payment'
+        verbose_name_plural = 'Evexia Order Payments'
+
+    def __str__(self):
+        return f"Patient {self.patient_id} - Order {self.id} - Status: {self.payment_status}"

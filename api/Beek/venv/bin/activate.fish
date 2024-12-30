@@ -33,7 +33,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV "/home/dev-16/beek-health/beekhealth-be-master/api/Beek/venv"
+set -gx VIRTUAL_ENV "/home/rte/new-beek-health/beek-backend/api/Beek/venv"
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/bin" $PATH

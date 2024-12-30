@@ -1,15 +1,15 @@
 
 from beek.responses import SuccessResponse, ErrorResponse
+from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.views import APIView, View
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter
-from .models import (Provider, UserServiceToken, Prescription, ServiceProvider, Service, Allergy, Immunization, Document,
-                     Encounter, Condition)
+from .models import (Provider, UserServiceToken, Prescription, ServiceProvider, Service, Allergy, Immunization, Document,Encounter, Condition,EvexiaMenu,EvexiaPatient, EvexiaOrders,EvexiaPayment)
 from user.models import PersonalInfo, User, ALLOWED_EXCERCISE_CHOICES
 from .serializers import (ProvidersListSerializer, PrescriptionSerializer, GeneralHealthSerializer,
                            AllergySerializer, ImmunizationSerializer, ProfileAdditionalInfoSerializer,
-                           DocumentSerializer, ConnectedProvidersSerializer, EncounterSerializer, ConditionSerializer)
+                           DocumentSerializer, ConnectedProvidersSerializer, EncounterSerializer, ConditionSerializer, EvexiaMenuSerializer,EvexiaPatientSerializer,EvexiaOrdersSerializer)
 from decouple import config
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -38,7 +38,12 @@ from health.utils import send_task_on_provider_connect
 from rest_framework.exceptions import NotFound
 from beek.settings import ssl_enabled
 import mimetypes
-
+from concurrent.futures import ThreadPoolExecutor
+executor = ThreadPoolExecutor(max_workers=1)
+EVEXIA_BASE_URL = config('EVEXIA_BASE_URL')
+AUTH_TOKEN = config('AUTH_TOKEN')
+EXTERNAL_CLIENT_ID = config('EXTERNAL_CLIENT_ID')
+headers = {'Authorization': AUTH_TOKEN}
 
 
 bad_request_err_msg = "Something went wrong"
@@ -1823,3 +1828,854 @@ class DashboardRefreshDetails(APIView):
         except Exception as e:
             print(str(e))
             return ErrorResponse(error=str(e), status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+class OrderLabTestListView_Insert(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	@swagger_auto_schema(
+		operation_summary="Fetch and filter products from an order_lab_test API",
+		operation_description="Fetch products from an order_lab_test API, filter based on LabID, and return the filtered list."
+	)
+	def get(self, request):
+		try:
+			# Validate environment variables
+			if not EVEXIA_BASE_URL or not AUTH_TOKEN or not EXTERNAL_CLIENT_ID:
+				return Response(
+					{"message": "External API URL or Authorization Token not set in environment variables."},
+					status=status.HTTP_500_INTERNAL_SERVER_ERROR
+				)
+			URL = f"{EVEXIA_BASE_URL}ClientTestMenu?ExternalClientID={EXTERNAL_CLIENT_ID}"
+
+			response = requests.get(URL, headers=headers)
+
+			# Debugging API response
+			print(f"External API response status: {response.status_code}")
+
+			if response.status_code != 200:
+				return Response(
+					{"message": "Failed to fetch products from order_lab_test API.", "details": response.text},
+					status=response.status_code
+				)
+
+			# Extract data and filter it
+			products = response.json()
+			if not products:
+				print("No products found in the order_lab_test API response.")
+				return Response({"message": "No products found."}, status=status.HTTP_404_NOT_FOUND)
+
+			# Filter products where LabID == 20
+			filtered_data = [product for product in products if product.get('LabID') == 20]
+			print(f"Insert Filtered data count (LabID === 20): {len(filtered_data)}")
+
+			# Insert filtered data into the EvexiaMenu table, ensuring no duplicates
+			for product in filtered_data:
+				# Check if product already exists based on product_id
+				existing_product = EvexiaMenu.objects.filter(product_id=product.get('ProductID')).first()
+				if not existing_product:
+					# If no existing product, create a new entry
+					EvexiaMenu.objects.create(
+						product_id=product.get('ProductID'),
+						product_name=product.get('ProductName'),
+						lab_id=product.get('LabID'),
+						is_panel=product.get('IsPanel', False),
+						sales_price =product.get('SalesPrice', 0),
+						test_code=product.get('TestCode'),
+						is_kit=product.get('IsKit', False),
+						lab_name=product.get('LabName'),
+					)
+				else:
+					print(f"Product with ID {product.get('ProductID')} already exists. Skipping insertion.")
+			
+			return Response({"message": "Filtered data inserted successfully."}, status=status.HTTP_200_OK)
+
+		except requests.exceptions.RequestException as e:
+			# Handle specific exceptions related to the HTTP request
+			print(f"HTTP request error: {str(e)}")
+			return Response(
+				{"message": "Error while fetching products from order_lab_test API.", "error": str(e)},
+				status=status.HTTP_502_BAD_GATEWAY
+			)
+		except Exception as e:
+			# General exception handling
+			print(f"Unexpected error: {str(e)}")
+			return Response(
+				{"message": "Internal server error while fetching products.", "error": str(e)},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+
+
+
+class OrderLabTestListView(APIView):
+	serializer_class = EvexiaMenuSerializer
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+	pagination_class = None  # Modify if you want to enable pagination
+
+	def __init__(self):
+		self.redis_client = redis.StrictRedis(
+			host=config('WS_REDIS_HOST'),
+			port=config('WS_REDIS_PORT'),
+			db=0,
+			password=config('WS_REDIS_PASSWORD'),
+			ssl=ssl_enabled,
+			ssl_cert_reqs=None
+		)
+		self.api_url = f"{EVEXIA_BASE_URL}ClientTestMenu?ExternalClientID={EXTERNAL_CLIENT_ID}"
+
+	@swagger_auto_schema(
+		manual_parameters=[
+			openapi.Parameter(
+				"lab_id", openapi.IN_QUERY, description="Filter by LabID", type=openapi.TYPE_INTEGER
+			),
+			openapi.Parameter(
+				"product_name", openapi.IN_QUERY, description="Filter by Product Name", type=openapi.TYPE_STRING
+			),
+		],
+		operation_summary="Fetch and list lab test products",
+		operation_description="Retrieve a list of lab test products, optionally filtered by LabID or Product Name.",
+	)
+	def get(self, request):
+		try:
+			# Retrieve data from Redis cache
+			redis_data = self.redis_client.get("lab_test_list_lab20")
+			if redis_data:
+				products = json.loads(redis_data)
+				print("Data fetched from Redis cache. Products length:", len(products))
+			else:
+				# Fetch from external API
+				products = self.fetch_lab_tests_from_api()
+				
+				# Filter LabID == 20 before caching
+				products = [p for p in products if p.get("LabID") == 20]
+				print("Filtered LabID == 20. Products length:", len(products))
+				# Cache filtered data in Redis with expiry (e.g., 1 hour)
+				self.redis_client.set("lab_test_list_lab20", json.dumps(products), ex=3600)
+
+				# Start background thread for database write
+				thread = threading.Thread(target=self.write_to_database_evexia_menu, args=(products,))
+				thread.start()
+
+			# Apply additional filters from request
+			lab_id = request.GET.get("lab_id", 20)  # Default LabID to 20
+			product_name = request.GET.get("product_name")
+
+			if lab_id:
+				products = [p for p in products if p.get("LabID") == int(lab_id)]
+			if product_name:
+				products = [p for p in products if product_name.lower() in p.get("ProductName", "").lower()]
+
+			return Response(products, status=status.HTTP_200_OK)
+
+		except Exception as e:
+			print(f"Error: {e}")
+			return Response(
+				{"message": "Error fetching lab test products.", "error": str(e)},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+			)
+
+	def fetch_lab_tests_from_api(self):
+		"""
+		Fetch lab tests from the external API.
+		"""
+		try:
+			response = requests.get(self.api_url, headers=headers)
+			if response.status_code != 200:
+				raise Exception(f"External API error: {response.status_code} - {response.text}")
+			return response.json()
+		except requests.exceptions.RequestException as e:
+			raise Exception(f"Error while fetching products: {str(e)}")
+
+	def write_to_database_evexia_menu(self, products):
+		"""
+		Write the products to the database in a background thread.
+		Only save products with LabID == 20.
+		"""
+		for product in products:
+			try:
+				if product.get("LabID") == 20:  # Only save LabID == 20
+					if not EvexiaMenu.objects.filter(product_id=product.get("ProductID")).exists():
+						EvexiaMenu.objects.create(
+							product_id=product.get("ProductID"),
+							product_name=product.get("ProductName"),
+							lab_id=product.get("LabID"),
+							is_panel=product.get("IsPanel", False),
+							sales_price=product.get("SalesPrice", 0),
+							test_code=product.get("TestCode"),
+							is_kit=product.get("IsKit", False),
+							lab_name=product.get("LabName"),
+						)
+			except Exception as e:
+				print(f"Error inserting product {product.get('ProductID')}: {str(e)}")
+
+class PatientAdd(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	def post(self, request):
+		"""
+		Add a new patient to the health_evexia_patient table
+		"""
+		try:
+			# Load environment variables
+			# Validate environment variables
+			if not all([EVEXIA_BASE_URL, AUTH_TOKEN, EXTERNAL_CLIENT_ID]):
+				return Response(
+					{"message": "External API URL or Authorization Token not set in environment variables."},
+					status=status.HTTP_500_INTERNAL_SERVER_ERROR
+				)
+
+			# Prepare the patient data mapping from the frontend request
+			patient_data = {
+				"EmailAddress": request.data.get('EmailAddress'),
+				"FirstName": request.data.get('FirstName'),
+				"LastName": request.data.get('LastName'),
+				"StreetAddress": request.data.get('StreetAddress'),
+				"City": request.data.get('City'),
+				"State": request.data.get('State'),
+				"PostalCode": request.data.get('PostalCode'),
+				"Phone": request.data.get('Phone'),
+				"DOB": request.data.get('DOB'),
+				"Gender": request.data.get('Gender'),
+				"ExternalClientID": EXTERNAL_CLIENT_ID
+			}
+			add_patient_url=f"{EVEXIA_BASE_URL}PatientAdd" 
+			# Make a POST request to the external API to save the data
+			external_response = requests.post(add_patient_url, headers=headers, json=patient_data)
+			external_response_data = external_response.json() 
+			print("Status code:",external_response.status_code)
+			print("external_response_data:",external_response_data)
+			print("user_id::::",request.data.get('user_id'))
+
+
+			patient_id = external_response_data.get('PatientID')
+			if external_response.status_code == 200 and patient_id and patient_id != "Invalid:Patient already exists":
+				# Create a new patient record in the database
+				EvexiaPatient.objects.create(
+					patient_id=patient_id,
+					external_client_id=EXTERNAL_CLIENT_ID,
+					user_id=request.data.get('user_id')
+				)
+				return Response(
+					{"message": "Patient added successfully!", "PatientID": patient_id,"status":status.HTTP_201_CREATED},
+					status=status.HTTP_201_CREATED
+				)
+			elif patient_id == "Invalid:Patient already exists":
+				return Response(
+					{"message": "Patient already exists.", "PatientID": patient_id},
+					status=status.HTTP_409_CONFLICT  # HTTP 409 Conflict
+				)
+			else:
+				return Response(
+					{"message": "Failed to add patient to external API", "external_error": external_response.text},
+					status=external_response.status_code
+				)
+		except requests.exceptions.RequestException as e:
+			return Response(
+				{"message": "Error communicating with external API.", "error": str(e)},
+				status=status.HTTP_502_BAD_GATEWAY
+			)
+		except Exception as e:
+			return Response(
+				{"message": "Internal server error while adding patient.", "error": str(e)},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+
+class PatientList(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	@swagger_auto_schema(
+		operation_summary="Fetch patient data from health_evexia_patient",
+		operation_description="Fetch patient data from the health_evexia_patient table by user_id."
+	)
+	def get(self, request):
+		try:
+			# Get the patient_id from query parameters
+			user_id = request.query_params.get('user_id')
+			
+			if not user_id:
+				return Response(
+					{"message": "user_id is required."},
+					status=status.HTTP_400_BAD_REQUEST
+				)
+			
+			# Fetch the patient data by user_id
+			patient_data = EvexiaPatient.objects.filter(user_id=user_id).first()
+
+			if not patient_data:
+				return Response(
+					{"message": "Patient not found."},
+					status=status.HTTP_404_NOT_FOUND
+				)
+
+			# Serialize the patient data
+			serializer = EvexiaPatientSerializer(patient_data)
+
+			# Return the serialized data as a response
+			return Response(serializer.data, status=status.HTTP_200_OK)
+
+		except Exception as e:
+			# General exception handling
+			print(f"Unexpected error: {str(e)}")
+			return Response(
+				{"message": "Internal server error while fetching patient data.", "error": str(e)},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+
+			)
+		
+
+class OrderAdd(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	def post(self, request):
+		"""
+		Add orders to the external API and process the response for each order.
+		"""
+		try:
+			# Validate environment variables
+			if not all([EVEXIA_BASE_URL, AUTH_TOKEN]):
+				return Response(
+					{"message": "External API URL or Authorization Token not set in environment variables."},
+					status=status.HTTP_500_INTERNAL_SERVER_ERROR
+				)
+
+			order_data = request.data  # Single order data
+			# print("order_data::::::::::::::::::", order_data)
+
+			# Send the request for each order
+			add_url = f"{EVEXIA_BASE_URL}OrderAdd"
+			external_response = requests.post(add_url, headers=headers, json=order_data)
+
+			# Check if the request was successful
+			if external_response.status_code == 200:
+				external_response_data = external_response.json()
+
+				# Create and save the order
+				evexia_order = EvexiaOrders(
+					patient_id=order_data['patientID'],
+					patient_order_id=external_response_data.get('PatientOrderID'),
+					product_id=order_data.get('product_id'),
+				)
+				evexia_order.save()
+
+				return Response(
+					{"message": "Successfully added the order.", "patientOrderId": external_response_data.get('PatientOrderID'),"status":status.HTTP_201_CREATED},
+					status=status.HTTP_201_CREATED
+				)
+			else:
+				return Response(
+					{"message": f"Failed to add order. Error: {external_response.text}"},
+					status=status.HTTP_400_BAD_REQUEST
+				)
+
+		except Exception as e:
+			return Response(
+				{"message": "Internal server error while adding orders.", "error": str(e)},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+
+class OrderList(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	@swagger_auto_schema(
+		operation_summary="Fetch all orders from EvexiaOrders",
+		operation_description="Fetch all orders from the health_evexia_orders table, optionally filtered by patient_id.",
+		manual_parameters=[
+			openapi.Parameter(
+				'patient_id',
+				openapi.IN_QUERY,
+				description="Filter orders by patient_id",
+				type=openapi.TYPE_STRING,
+			)
+		]
+	)
+	def get(self, request):
+		try:
+			# Get optional patient_id query parameter
+			patient_id = request.query_params.get('patient_id')
+
+			# Fetch orders, filtered by patient_id if provided
+			if patient_id:
+				orders = EvexiaOrders.objects.filter(patient_id=patient_id, payment_status__isnull=True)
+
+
+			if not orders.exists():
+				return Response(
+					{"message": "No orders found."},
+					status=status.HTTP_200_OK
+				)
+
+			# Serialize the order data
+			serializer = EvexiaOrdersSerializer(orders, many=True)
+
+			# Return the serialized data as a response
+			return Response(serializer.data, status=status.HTTP_200_OK)
+
+		except Exception as e:
+			# General exception handling
+			print(f"Unexpected error: {str(e)}")
+			return Response(
+				{"message": "Internal server error while fetching orders.", "error": str(e)},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+
+class OrderListPatient(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	@swagger_auto_schema(
+		operation_summary="Fetch all orders from EvexiaOrders",
+		operation_description="Fetch all orders from the health_evexia_orders table, optionally filtered by patient_id.",
+		manual_parameters=[
+			openapi.Parameter(
+				'patient_id',
+				openapi.IN_QUERY,
+				description="Filter orders by patient_id",
+				type=openapi.TYPE_STRING,
+			)
+		]
+	)
+	def get(self, request):
+		try:
+			# Get optional patient_id query parameter
+			patient_id = request.query_params.get('patient_id')
+			print('patient_id ::::',patient_id)
+
+			# Fetch orders, filtered by patient_id if provided
+			if patient_id:
+				orders = EvexiaOrders.objects.filter(
+					patient_id=patient_id,
+					payment_status="succeeded"
+					)
+
+
+			if not orders.exists():
+				return Response(
+					{"message": "No orders found."},
+					status=status.HTTP_404_NOT_FOUND
+				)
+
+			# Serialize the order data
+			serializer = EvexiaOrdersSerializer(orders, many=True)
+
+			# Return the serialized data as a response
+			return Response(serializer.data, status=status.HTTP_200_OK)
+
+		except Exception as e:
+			# General exception handling
+			print(f"Unexpected error: {str(e)}")
+			return Response(
+				{"message": "Internal server error while fetching orders.", "error": str(e)},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+
+
+
+
+class OrderPayment(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	@swagger_auto_schema(
+		operation_summary="Handle order payment",
+		operation_description="Processes payment using Stripe and records the transaction.",
+		request_body=openapi.Schema(
+			type=openapi.TYPE_OBJECT,
+			properties={
+				'email': openapi.Schema(type=openapi.TYPE_STRING, description='Customer email'),
+				'name': openapi.Schema(type=openapi.TYPE_STRING, description='Customer name'),
+				'amount': openapi.Schema(type=openapi.TYPE_NUMBER, description='Payment amount'),
+				'patient_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Patient ID'),
+				'payment_method': openapi.Schema(type=openapi.TYPE_STRING, description='Payment method'),
+			},
+		)
+	)
+	def post(self, request):
+		patient_id = request.data.get("patient_id")
+		
+		url = f"{EVEXIA_BASE_URL}PatientList?externalClientID={EXTERNAL_CLIENT_ID}&patientID={patient_id}"
+		# Make the GET request
+		response = requests.get(url, headers=headers)
+		# Ensure the response is successful
+		response.raise_for_status()
+		# Parse the JSON response
+		response_data = response.json()
+		# Retrieve data from request body
+		patient_data = response_data[0]
+		email = patient_data.get("EmailAddress")
+		name = patient_data.get("FirstName")
+		amount = request.data.get("amount")
+		patient_order_id = request.data.get("patient_order_id")
+
+		payment_method = request.data.get("paymentMethodId")
+		
+		if not email or not name or not amount or not patient_id or not payment_method:
+			return Response(
+				{"success": False, "message": "Missing required fields."},
+				status=status.HTTP_400_BAD_REQUEST
+			)
+
+		try:
+			# Convert amount to cents (Stripe requires amounts in cents)
+			amount_in_cents = int(float(amount) * 100)
+
+			# Retrieve or create Stripe customer
+			customers = stripe.Customer.list(email=email, limit=1)
+			customer = customers['data'][0] if customers['data'] else stripe.Customer.create(email=email, name=name)
+			# Create Stripe PaymentIntent
+			payment_intent = stripe.PaymentIntent.create(
+				amount=amount_in_cents,
+				currency='usd',
+				customer=customer['id'],
+				description="Charge for products",
+				payment_method=payment_method,
+				confirm=True,
+				automatic_payment_methods={
+					'enabled': True,
+					'allow_redirects': 'never',
+				},
+			)
+
+			# Use database transaction to avoid partial saves
+			with transaction.atomic():
+				# Save payment data to the database
+				payment = EvexiaPayment.objects.create(
+					patient_id=patient_id,
+					patient_order_id=patient_order_id,
+					payment_id=payment_intent.id,
+					total_amount=amount,
+					payment_status="succeeded", 
+				)
+				print(f"Payment saved to database: {payment}")
+				evexia_order = EvexiaOrders.objects.get(patient_order_id=patient_order_id)
+				evexia_order.payment_status = "succeeded"
+				evexia_order.save()
+				url = f"{EVEXIA_BASE_URL}PatientOrderComplete?externalClientID={EXTERNAL_CLIENT_ID}&patientOrderID={patient_order_id}&patientPay=false"
+				submit_order = requests.get(url, headers=headers)
+				print("submit_order status_code::::::::::",submit_order.status_code)
+
+				if submit_order.status_code == 200:
+					WEBHOOK_BASE_URL = config('WEBHOOK_BASE_URL')
+					# Prepare the JSON payload with all required data
+					requisition_data = {
+						"patientOrderID": patient_order_id,
+						"patientID": patient_id,
+					}
+					# requests.post(WEBHOOK_BASE_URL, json=requisition_data)
+					executor.submit(send_webhook_request, WEBHOOK_BASE_URL, requisition_data)
+				else:
+					return Response(
+						{"message": "Failed to complete the patient order.", "details": submit_order.text},
+						status=submit_order.status_code
+					)
+
+			return Response(
+				{"success": True,"clientSecret": payment_intent.client_secret, "paymentId": payment_intent.id},
+				status=status.HTTP_200_OK
+			)
+
+		except stripe.error.StripeError as e:
+			# Stripe-specific error handling
+			print(f"Stripe error: {str(e)}")
+			return Response(
+				{"success": False, "message": "Stripe error occurred", "error": str(e)},
+				status=status.HTTP_400_BAD_REQUEST
+			)
+		except Exception as e:
+			# General error handling
+			print(f"General error: {str(e)}")
+			return Response(
+				{"success": False, "message": "Failed to create payment intent", "error": str(e)},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+
+
+def send_webhook_request(webhook_url, payload):
+	try:
+		webhook_response = requests.post(webhook_url, json=payload)
+		print(f"Webhook Response Status Code: {webhook_response.status_code}")
+	except Exception as e:
+		# Handle exceptions (e.g., logging)
+		print(f"Failed to send webhook: {e}")
+
+class OrderItemsAdd(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	def post(self, request):
+		"""
+		Add orders to the external API and process the response for each order.
+		"""
+		try:
+			# Validate environment variables
+			if not all([EVEXIA_BASE_URL, AUTH_TOKEN, EXTERNAL_CLIENT_ID]):
+				return Response(
+					{"message": "External API URL or Authorization Token not set in environment variables."},
+					status=status.HTTP_500_INTERNAL_SERVER_ERROR
+				)
+
+			# Get the order data from the request
+			order_data = request.data  # Data sent from the frontend
+			patient_id = order_data.get("patientID")
+			patient_order_id = order_data.get("patientOrderID")
+
+			if not patient_id or not patient_order_id:
+				return Response(
+					{"message": "Patient ID and Patient Order ID are required."},
+					status=status.HTTP_400_BAD_REQUEST
+				)
+
+			# Send the request to the external API to add order items
+			order_item_url = f"{EVEXIA_BASE_URL}OrderItemsAdd"
+			external_response = requests.post(order_item_url, headers=headers, json=order_data)
+
+			print("OrderItemsAdd status_code::::::::::;;;;", external_response.status_code)
+
+			# Check if the external API responded with success
+			if external_response.status_code == 200:
+				# Fetch the order details from the external API
+				order_details_url = (
+					f"{EVEXIA_BASE_URL}OrderDetail?externalClientID={EXTERNAL_CLIENT_ID}"
+					f"&patientID={patient_id}&PatientOrderID={patient_order_id}"
+				)
+				order_details_response = requests.get(order_details_url, headers=headers)
+				order_details_response.raise_for_status()  # Raise an exception for HTTP errors
+
+				response_data = order_details_response.json()
+				print("OrderItemsAdd details::::::::::;;;;", response_data)
+
+				return Response(
+					{"status":status.HTTP_200_OK,"message": "Order successfully added", "details": response_data},
+					status=status.HTTP_200_OK
+				)
+			else:
+				return Response(
+					{
+						"message": "Failed to add order to external API.",
+						"details": external_response.text
+					},
+					status=external_response.status_code
+				)
+
+		except requests.exceptions.RequestException as e:
+			# Handle errors related to the requests library
+			return Response(
+				{"message": "External API request failed.", "error": str(e)},
+				status=status.HTTP_502_BAD_GATEWAY
+			)
+		except Exception as e:
+			# Handle unexpected errors
+			return Response(
+				{"message": "Internal server error while adding orders.", "error": str(e)},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+
+
+
+class FetchOrderDetails(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	def post(self, request):
+		"""
+		Fetch order details from the external API using patientOrderID and patientID.
+		If no data is found, return a 204 No Content response.
+		"""
+		try:
+			# Validate environment variables
+			if not all([AUTH_TOKEN, EXTERNAL_CLIENT_ID, EVEXIA_BASE_URL]):
+				return Response(
+					{"message": "External API URL or Authorization Token not set in environment variables."},
+					status=status.HTTP_500_INTERNAL_SERVER_ERROR
+				)
+
+			# Retrieve required parameters from the query params
+			patient_order_id = request.query_params.get("patientOrderID")
+			patient_id = request.query_params.get("patientID")
+
+			if not patient_order_id or not patient_id:
+				return Response(
+					{"message": "PatientOrderID and PatientID are required."},
+					status=status.HTTP_400_BAD_REQUEST
+				)
+
+			# Construct the URL for the external API request
+			url = (
+				f"{EVEXIA_BASE_URL}OrderDetail"
+				f"?ExternalClientID={EXTERNAL_CLIENT_ID}"
+				f"&PatientID={patient_id}"
+				f"&PatientOrderID={patient_order_id}"
+			)
+			response = requests.get(url, headers=headers)
+
+			# Handle 204 No Content
+			if response.status_code == 204:
+				return Response(
+					{"message": "No order details found for the provided PatientOrderID and PatientID."},
+					status=status.HTTP_204_NO_CONTENT
+				)
+
+			# Handle 200 OK
+			elif response.status_code == 200:
+				response_data = response.json()
+				# Ensure response data is not empty
+				if not response_data:
+					return Response(
+						{"message": "No data returned from the external API."},
+						status=status.HTTP_204_NO_CONTENT
+					)
+
+				return Response(response_data, status=status.HTTP_200_OK)
+
+			# Handle other HTTP status codes
+			else:
+				return Response(
+					{"message": f"External API returned unexpected status: {response.status_code}"},
+					status=response.status_code
+				)
+
+		except requests.exceptions.RequestException as e:
+			# Handle request exceptions like network errors
+			return Response(
+				{"message": f"Error communicating with external API: {str(e)}"},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+		except Exception as e:
+			# Catch any other errors
+			return Response(
+				{"message": f"An unexpected error occurred: {str(e)}"},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+
+class FetchOrderResults(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	def post(self, request):
+		"""
+		Add orders to the external API and process the response for each order.
+		"""
+		try:
+			# Validate environment variables
+			if not all([AUTH_TOKEN, EXTERNAL_CLIENT_ID]):
+				return Response(
+					{"message": "External API URL or Authorization Token not set in environment variables."},
+					status=status.HTTP_500_INTERNAL_SERVER_ERROR
+				)
+
+			# Get the order data from the request
+			patient_order_id = request.GET.get("patientOrderID")
+			patient_id = request.GET.get("patientID")
+
+			if not patient_order_id or not patient_id:
+				return Response(
+					{"message": "PatientOrderID and PatientID are required."},
+					status=status.HTTP_400_BAD_REQUEST
+				)
+
+			# Additional validation to ensure both patient_order_id and patient_id are numeric
+			try:
+				patient_order_id = int(patient_order_id)
+				patient_id = int(patient_id)
+			except ValueError:
+				return Response(
+					{"message": "PatientOrderID and PatientID must be valid integers."},
+					status=status.HTTP_400_BAD_REQUEST
+				)
+
+			# Construct the URL for the external API request
+			url = f"{EVEXIA_BASE_URL}ResultAnalyteGet?externalClientID={EXTERNAL_CLIENT_ID}&patientID={patient_id}&patientOrderID={patient_order_id}"
+
+			# Make the GET request to the external API
+			patient_response = requests.get(url, headers=headers)
+
+			# Ensure the response is successful
+			patient_response.raise_for_status()
+			print("asdddddddddddddddd",patient_response.json())
+			# Attempt to parse the JSON response
+			try:
+				response_data = patient_response.json()
+			except ValueError:
+				# Handle the case where the response is not valid JSON
+				return Response(
+					{"message": "Error: Received non-JSON response from the external API."},
+					status=status.HTTP_500_INTERNAL_SERVER_ERROR
+				)
+
+			# Return the response from the external API (or processed data)
+			return Response(response_data, status=status.HTTP_200_OK)
+
+		except requests.exceptions.RequestException as e:
+			# Handle request exceptions like network errors
+			return Response(
+				{"message": f"Error communicating with external API: {str(e)}"},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+		except Exception as e:
+			# Catch any other errors
+			return Response(
+				{"message": f"An unexpected error occurred: {str(e)}"},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)
+
+class DeleteItemOrder(APIView):
+	permission_classes = [IsAuthenticated, HasActiveSubscription]
+
+	def post(self, request):
+		"""
+		Delete an item order via the external API and process the response.
+		"""
+		try:
+			# Validate environment variables
+			if not all([AUTH_TOKEN, EXTERNAL_CLIENT_ID]):
+				return Response(
+					{"message": "Authorization token or client ID is not set in environment variables."},
+					status=status.HTTP_500_INTERNAL_SERVER_ERROR
+				)
+
+			# Get the order data from the request body
+			patient_order_id = request.data.get("patientOrderid")
+			product_id = request.data.get("product_id")
+
+			# Validate input
+			if not patient_order_id or not product_id:
+				return Response(
+					{"message": "Both 'patientOrderid' and 'product_id' are required."},
+					status=status.HTTP_400_BAD_REQUEST
+				)
+			# Check if the order exists in the EvexiaOrders table
+			# try:
+			#     evexia_order = EvexiaOrders.objects.get(
+			#         patient_order_id=patient_order_id, product_id=product_id
+			#     )
+			#     # Delete the order from the table
+			#     evexia_order.delete()
+			#     print(f"Order with patient_order_id={patient_order_id} and product_id={product_id} deleted from EvexiaOrders table.")
+			# except EvexiaOrders.DoesNotExist:
+			#     print(f"No order found in EvexiaOrders table with patient_order_id={patient_order_id} and product_id={product_id}.")
+			# Construct the URL for the external API request
+			url = f"{EVEXIA_BASE_URL}OrderItemDelete"
+			# Prepare the payload for the external API request
+			item_order = {
+				"patientOrderID": patient_order_id,
+				"externalClientID": EXTERNAL_CLIENT_ID,
+				"productID": product_id,
+				"isPanel": "false"
+			}
+		
+			# Make the external API request
+			external_response = requests.post(url, headers=headers, json=item_order)
+
+			# Handle external API response
+			if external_response.status_code == 200:
+				return Response(
+					{"message": "Item deleted successfully.", "status":external_response.status_code},
+					status=status.HTTP_200_OK
+				)
+			else:
+				return Response(
+					{
+						"message": "Failed to delete item order.",
+						"status": external_response.status_code,
+					},
+					status=external_response.status_code
+				)
+
+		except Exception as e:
+			# Catch any other errors
+			return Response(
+				{"message": f"An unexpected error occurred during delete item: {str(e)}"},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR
+			)

@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from rest_framework.serializers import ModelSerializer
-from health.models import Provider, Prescription, Allergy, Immunization, Document, ServiceProvider, Encounter, Condition
+from health.models import Provider, Prescription, Allergy, Immunization, Document, ServiceProvider, Encounter, Condition, EvexiaMenu, EvexiaPatient, EvexiaOrders
 from user.models import PersonalInfo
 from user.models import ALLOWED_EXCERCISE_CHOICES, ALLOWED_GOALS_CHOICES
 from rest_framework.exceptions import ValidationError
@@ -349,4 +349,21 @@ class ConditionSerializer(ModelSerializer):
     """
     class Meta:
         model = Condition
+        fields = '__all__'
+
+class EvexiaMenuSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EvexiaMenu
+        fields = '__all__'  # Serializes all fields of the EvexiaMenu model
+
+class EvexiaPatientSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EvexiaPatient
+        fields = '__all__'	
+
+class EvexiaOrdersSerializer(serializers.ModelSerializer):
+    documents = serializers.CharField()  # This will preserve the format of the document URL
+
+    class Meta:
+        model = EvexiaOrders
         fields = '__all__'

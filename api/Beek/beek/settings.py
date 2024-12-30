@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     'user',
     'health',
     'bulk_export',
+    'hcpt'
 ]
 
 MIDDLEWARE = [
